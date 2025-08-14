@@ -52,6 +52,14 @@ CATEGORIES = [
     "erp-insight"
 ]
 
+# WARMUP OLLAMA BEFORE STARTING TO USE IT
+def warmup_ollama():
+    """Warm up Ollama so the first real request is faster."""
+    try:
+        _ = call_llm("Say OK.", model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct"), max_tokens=32)
+    except Exception:
+        pass
+
 # =============== HELPERS TO CHECK THE ARTICLES =========================== #
 
 ARTICLE_EXT_BLOCKLIST = (".css", ".js", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".ico", ".woff", ".woff2")
@@ -158,20 +166,86 @@ def call_llm(prompt: str,
         return "\n".join(parts).strip()
 
     if provider == "ollama":
-        # Local API (no extra lib)
-        url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
-        model = model or os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-        r = requests.post(url, json={
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": temperature}
-        }, timeout=120)
-        r.raise_for_status()
-        data = r.json()
-        return (data.get("response") or "").strip()
+        # Normalize base URL (do NOT include /api in the env var)
+        base = (os.getenv("OLLAMA_URL") or "http://127.0.0.1:11434/api/chat").rstrip("/")
+        if base.endswith("/api"):
+            base = base[:-4]
+        model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 
-    raise RuntimeError(f"Unsupported LLM_PROVIDER: {provider}")
+        chat_url = f"{base}/api/chat"
+        generate_url = f"{base}/api/generate"
+
+        # Read tuning from env (with safe defaults)
+        num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "3072"))
+        num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", str(max_tokens)))
+        num_gpu = int(os.getenv("OLLAMA_NUM_GPU", "0"))
+        num_thread_env = int(os.getenv("OLLAMA_NUM_THREAD", "0"))
+        keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
+        http_timeout = int(os.getenv("OLLAMA_TIMEOUT", "480"))
+
+        # Common generation options (CPU-only friendly)
+        opts = {
+            "temperature": float(temperature),
+            "top_p": 0.9,
+            "repeat_penalty": 1.05,
+            "num_ctx": num_ctx,
+            "num_predict": num_predict,
+            "num_gpu": num_gpu,  # 0 = CPU only
+        }
+        if num_thread_env > 0:
+            opts["num_thread"] = num_thread_env
+
+        headers = {"Content-Type": "application/json"}
+
+        # Prefer the chat endpoint; include keep_alive to keep the model loaded
+        payload_chat = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": opts,
+            "keep_alive": keep_alive,
+        }
+
+        try:
+            r = requests.post(chat_url, json=payload_chat, headers=headers, timeout=http_timeout)
+            # Fallback to /api/generate if chat endpoint is unavailable
+            if r.status_code in (404, 405):
+                payload_gen = {
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": opts,
+                    "keep_alive": keep_alive,
+                }
+                r = requests.post(generate_url, json=payload_gen, headers=headers, timeout=http_timeout)
+
+            r.raise_for_status()
+            data = r.json()
+
+            # Parse response: chat -> message.content, generate -> response
+            text = None
+            if isinstance(data.get("message"), dict):
+                text = data["message"].get("content")
+            if not text:
+                text = data.get("response")
+            if not text:
+                raise RuntimeError(f"Ollama returned an empty response: {data}")
+
+            return text.strip()
+
+        except requests.exceptions.ReadTimeout:
+            # Retry once with a shorter target length and a longer timeout
+            opts["num_predict"] = max(400, num_predict // 2)  # cut length to speed up
+            payload_chat["options"] = opts
+            r2 = requests.post(chat_url, json=payload_chat, headers=headers, timeout=max(http_timeout, 600))
+            r2.raise_for_status()
+            data = r2.json()
+            text = None
+            if isinstance(data.get("message"), dict):
+                text = data["message"].get("content")
+            if not text:
+                text = data.get("response")
+            return (text or "").strip()
 
 # =============== FETCH & EXTRACT ===============
 
@@ -440,6 +514,10 @@ def write_markdown(title: str, body_md: str, url: str, category_hint: Optional[s
 # =============== MAIN ===============
 
 def main():
+    # Warm up only when using Ollama
+    if _current_provider() == "ollama":
+        warmup_ollama()
+        
     seen = load_state()
     candidates: List[Dict] = []
 
