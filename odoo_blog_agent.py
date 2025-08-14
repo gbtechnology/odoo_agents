@@ -53,6 +53,10 @@ CATEGORIES = [
 ]
 
 # WARMUP OLLAMA BEFORE STARTING TO USE IT
+def _current_provider() -> str:
+    """Return the active LLM provider in lowercase."""
+    return (os.getenv("LLM_PROVIDER") or "openai").lower()
+
 def warmup_ollama():
     """Warm up Ollama so the first real request is faster."""
     try:
