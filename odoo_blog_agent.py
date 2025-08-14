@@ -335,7 +335,7 @@ def extract_article(url: str) -> Tuple[str, str]:
             pass
         return None
 
-    def _pick_title(doc: LH.HtmlElement) -> str:
+    def _pick_title(doc: lh.HtmlElement) -> str:
         # 1) og:title
         node = doc.xpath("//meta[@property='og:title'][@content]")
         if node:
@@ -387,7 +387,7 @@ def extract_article(url: str) -> Tuple[str, str]:
             summary_html = doc.summary(html_partial=True)
             if not summary_html:
                 return ""
-            el = LH.fromstring(summary_html)
+            el = lh.fromstring(summary_html)
             # prendi paragrafi ed eventuali bullet
             parts = []
             for node in el.xpath(".//p[normalize-space()] | .//li[normalize-space()]"):
@@ -396,7 +396,7 @@ def extract_article(url: str) -> Tuple[str, str]:
         except Exception:
             return ""
 
-    def _extract_site_specific(base: str, doc: LH.HtmlElement) -> str:
+    def _extract_site_specific(base: str, doc: lh.HtmlElement) -> str:
         host = urlparse(base).netloc
         candidates = []
 
@@ -517,7 +517,7 @@ def main():
     # Warm up only when using Ollama
     if _current_provider() == "ollama":
         warmup_ollama()
-        
+
     seen = load_state()
     candidates: List[Dict] = []
 
