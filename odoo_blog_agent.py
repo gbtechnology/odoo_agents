@@ -7,8 +7,10 @@ import json
 import time
 import hashlib
 import datetime as dt
+import lxml.html as lh
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from readability import Document
 from urllib.parse import urlparse, urljoin
 import requests
 import feedparser
@@ -212,7 +214,7 @@ def fetch_page_listing(url: str) -> List[Dict]:
         return []
 
     try:
-        doc = LH.fromstring(html)
+        doc = lh.fromstring(html)
     except Exception:
         return []
 
@@ -236,18 +238,150 @@ def fetch_page_listing(url: str) -> List[Dict]:
 
 def extract_article(url: str) -> Tuple[str, str]:
     """
-    Returns (title, text) via trafilatura; empty strings on failure.
+
     """
-    try:
-        downloaded = trafilatura.fetch_url(url, timeout=20)
-        if not downloaded:
-            return "", ""
-        meta = trafilatura.extract_metadata(downloaded)
-        title = meta.title if meta else ""
-        text = trafilatura.extract(downloaded, include_comments=False, include_tables=False) or ""
-        return title or "", text or ""
-    except Exception:
+def extract_article(url: str) -> Tuple[str, str]:
+    """
+    Returns (title, text) using several strategies:
+    - Meta (og:title / twitter:title / <h1> / <title>)
+    - Trafilatura
+    - Readability-lxml
+    - Fallback XPath (Odoo / OCA)
+    """
+    def _fetch_html(u: str) -> Optional[str]:
+        try:
+            resp = requests.get(
+                u,
+                timeout=25,
+                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Safari/537.36"}
+            )
+            if resp.status_code == 200 and resp.text:
+                return resp.text
+        except Exception:
+            pass
+        return None
+
+    def _pick_title(doc: LH.HtmlElement) -> str:
+        # 1) og:title
+        node = doc.xpath("//meta[@property='og:title'][@content]")
+        if node:
+            t = (node[0].get("content") or "").strip()
+            if t:
+                return t
+        # 2) twitter:title
+        node = doc.xpath("//meta[@name='twitter:title'][@content]")
+        if node:
+            t = (node[0].get("content") or "").strip()
+            if t:
+                return t
+        # 3) H1
+        node = doc.xpath("//h1[normalize-space()]")
+        if node:
+            t = node[0].text_content().strip()
+            if t:
+                return t
+        # 4) <title>
+        node = doc.xpath("//title")
+        if node:
+            t = (node[0].text or "").strip()
+            if t:
+                return t
+        return ""
+
+    def _clean_text(s: str) -> str:
+        s = re.sub(r"\r\n?", "\n", s)
+        s = re.sub(r"[ \t]+", " ", s)
+        s = re.sub(r"\n{3,}", "\n\n", s)
+        return s.strip()
+
+    def _extract_with_trafilatura(html: str) -> str:
+        try:
+            txt = trafilatura.extract(
+                html,
+                include_comments=False,
+                include_tables=False,
+                favor_precision=True,
+                with_metadata=False,
+            )
+            return (txt or "").strip()
+        except Exception:
+            return ""
+
+    def _extract_with_readability(html: str) -> str:
+        try:
+            doc = Document(html)
+            summary_html = doc.summary(html_partial=True)
+            if not summary_html:
+                return ""
+            el = LH.fromstring(summary_html)
+            # prendi paragrafi ed eventuali bullet
+            parts = []
+            for node in el.xpath(".//p[normalize-space()] | .//li[normalize-space()]"):
+                parts.append(node.text_content().strip())
+            return _clean_text("\n\n".join(parts))
+        except Exception:
+            return ""
+
+    def _extract_site_specific(base: str, doc: LH.HtmlElement) -> str:
+        host = urlparse(base).netloc
+        candidates = []
+
+        candidates += doc.xpath("//article")
+        candidates += doc.xpath("//div[contains(@class,'blog') and contains(@class,'post')]")
+        candidates += doc.xpath("//div[contains(@class,'o_blog') or contains(@class,'o_wblog')]")
+        candidates += doc.xpath("//div[contains(@class,'post-content') or contains(@class,'entry-content')]")
+
+        if "odoo-community.org" in host:
+            candidates += doc.xpath("//div[contains(@class,'oe_structure') or contains(@class,'s_blog_post')]")
+
+        texts = []
+        for c in candidates:
+            ps = c.xpath(".//p[normalize-space()] | .//li[normalize-space()]")
+            chunk = "\n\n".join(p.text_content().strip() for p in ps)
+            chunk = _clean_text(chunk)
+            if len(chunk) > 400:
+                texts.append(chunk)
+
+        if texts:
+            return max(texts, key=len)
+        return ""
+
+    html = _fetch_html(url)
+    if not html:
         return "", ""
+
+    try:
+        doc = LH.fromstring(html)
+    except Exception:
+        doc = None
+
+    title = ""
+    if doc is not None:
+        title = _pick_title(doc)
+
+    text = _extract_with_trafilatura(html)
+
+    if len(text) < 600:
+        alt = _extract_with_readability(html)
+        if len(alt) > len(text):
+            text = alt
+
+    if len(text) < 600 and doc is not None:
+        alt2 = _extract_site_specific(url, doc)
+        if len(alt2) > len(text):
+            text = alt2
+
+    if not title:
+        try:
+            doc_r = Document(html)
+            t2 = (doc_r.short_title() or "").strip()
+            if t2:
+                title = t2
+        except Exception:
+            pass
+
+    return (title or "").strip(), _clean_text(text)
+
 
 # =============== CLASSIFY & WRITE ===============
 
