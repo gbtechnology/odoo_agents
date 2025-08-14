@@ -313,11 +313,6 @@ def fetch_page_listing(url: str) -> List[Dict]:
 
     return found[:20]
 
-
-def extract_article(url: str) -> Tuple[str, str]:
-    """
-
-    """
 def extract_article(url: str) -> Tuple[str, str]:
     """
     Returns (title, text) using several strategies:
@@ -504,15 +499,21 @@ def write_markdown(title: str, body_md: str, url: str, category_hint: Optional[s
     safe = re.sub(r"[^a-z0-9\-]+", "-", title.lower()).strip("-")[:80] or _hash(title)[:12]
     fname = f"{dt.date.today().isoformat()}-{safe}.md"
     path = OUT_DIR / fname
+
     post = frontmatter.loads(body_md)
+    # Ensure minimal metadata
     meta = post.metadata or {}
     meta.setdefault("date", dt.date.today().isoformat())
     meta.setdefault("sources", [url])
     if category_hint and not meta.get("category"):
         meta["category"] = category_hint
     post.metadata = meta
-    with open(path, "w", encoding="utf-8") as f:
-        frontmatter.dump(post, f)
+
+    # dumps() returns a string; write as UTF-8 text
+    content = frontmatter.dumps(post)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(content)
+
     return path
 
 # =============== MAIN ===============
