@@ -1,0 +1,9 @@
+requests
+feedparser
+trafilatura
+readability-lxml
+python-frontmatter
+pyyaml
+openai
+anthropic
+python-dotenv
