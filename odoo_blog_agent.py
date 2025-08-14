@@ -9,7 +9,7 @@ import hashlib
 import datetime as dt
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urlparse, urljoin
 import requests
 import feedparser
 import frontmatter
@@ -49,6 +49,49 @@ CATEGORIES = [
     "odoo-technical-guide",
     "erp-insight"
 ]
+
+# =============== HELPERS TO CHECK THE ARTICLES =========================== #
+
+ARTICLE_EXT_BLOCKLIST = (".css", ".js", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".ico", ".woff", ".woff2")
+
+def _looks_like_article_odoo(u: str) -> bool:
+    p = urlparse(u)
+    if p.netloc not in ("www.odoo.com", "odoo.com"):
+        return False
+    path = p.path or ""
+    if "/blog/" not in path:
+        return False
+    if re.fullmatch(r"/[a-z]{2}_[A-Z]{2}/blog/?", path):
+        return False
+    last = path.rstrip("/").split("/")[-1]
+    return bool(re.search(r"-\d+$", last))
+
+def _looks_like_article_oca(u: str) -> bool:
+    p = urlparse(u)
+    if p.netloc not in ("odoo-community.org", "www.odoo-community.org"):
+        return False
+    path = p.path or ""
+    if not path.startswith("/blog/news-updates-1/"):
+        return False
+    last = path.rstrip("/").split("/")[-1]
+    return bool(re.search(r"-\d+$", last))
+
+def _is_article_url(base_url: str, candidate: str) -> bool:
+    if not candidate.startswith("http"):
+        return False
+    if candidate.endswith(ARTICLE_EXT_BLOCKLIST):
+        return False
+    host = urlparse(base_url).netloc
+    if "odoo.com" in host:
+        return _looks_like_article_odoo(candidate)
+    if "odoo-community.org" in host:
+        return _looks_like_article_oca(candidate)
+    path = urlparse(candidate).path or ""
+    if "/blog/" in path:
+        last = path.rstrip("/").split("/")[-1]
+        return bool(re.search(r"-\d+$", last))
+    return False
+
 
 # =============== LLM ROUTER ===============
 
@@ -162,17 +205,34 @@ def fetch_page_listing(url: str) -> List[Dict]:
     Uses a simple regex as a fallback; urljoin for robust absolute URLs.
     """
     try:
-        html = requests.get(url, timeout=20).text
+        resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        html = resp.text
     except Exception:
         return []
-    links = set(re.findall(r'href="(/blog[^"#?]+|https?://[^"]+)"', html))
-    items = []
-    for href in links:
-        full = href if href.startswith("http") else urljoin(url, href)
-        if any(x in full for x in ["#", "/tag/", "/page/", "/feed", "/mailing", "/signup"]):
+
+    try:
+        doc = LH.fromstring(html)
+    except Exception:
+        return []
+
+    found = []
+    seen = set()
+
+    for a in doc.xpath("//a[@href]"):
+        href = a.get("href", "")
+        if not href or href.startswith("mailto:") or href.startswith("tel:"):
             continue
-        items.append({"title": "(article)", "url": full, "published": ""})
-    return list(items)[:20]
+        full = urljoin(url, href)
+        full_noq = re.sub(r"(\?.*)$", "", full)
+        if full_noq in seen:
+            continue
+        if _is_article_url(url, full_noq):
+            seen.add(full_noq)
+            found.append({"title": "(article)", "url": full_noq, "published": ""})
+
+    return found[:20]
+
 
 def extract_article(url: str) -> Tuple[str, str]:
     """
