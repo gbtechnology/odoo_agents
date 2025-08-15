@@ -7,3 +7,4 @@ pyyaml
 openai
 anthropic
 python-dotenv
+googlenewsdecoder

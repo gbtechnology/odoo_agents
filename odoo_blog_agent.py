@@ -10,6 +10,7 @@ import datetime as dt
 import lxml.html as lh
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from googlenewsdecoder import gnewsdecoder
 from readability import Document
 from urllib.parse import urlparse, parse_qs, urljoin
 import requests
@@ -65,106 +66,56 @@ def warmup_ollama():
         pass
 
 # =============== HELPERS TO CHECK GOOGLE NEWS ARTICLES =========================== #
-def is_google_wrapper(u: str) -> bool:
+def is_google_wrapper(url: str) -> bool:
     """Return True if the link is a Google wrapper (Google News or google.com/url)."""
     try:
-        p = urlparse(u)
-        host = p.netloc.lower()
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
         if "news.google.com" in host:
             return True
-        if host.startswith("www.google.") and p.path == "/url":
+        if host.startswith("www.google.") and parsed.path == "/url":
             return True
     except Exception:
         pass
     return False
 
-def _extract_url_param(u: str) -> str:
+def _extract_url_param(url: str) -> str:
     """If URL has ?url=<encoded>, return that target; else return input."""
     try:
-        qs = parse_qs(urlparse(u).query)
+        qs = parse_qs(urlparse(url).query)
         if "url" in qs and qs["url"]:
             return qs["url"][0]
     except Exception:
         pass
-    return u
+    return url
 
-def resolve_google_news_url(u: str, timeout: int = 25) -> str:
+def resolve_google_news_url(source_url: str, interval_time: int = 1):
     """
     Resolve Google News aggregator URL to the original publisher URL.
-    Strategy:
-      1) If a ?url= param exists, use it.
-      2) GET the page (with redirects). If final URL is non-Google, return it.
-      3) Parse HTML; prefer <a href="https://www.google.com/url?url=..."> (extract url=).
-      4) Else pick first external absolute link (not *.google.* / *.gstatic.* / *.googleusercontent.*).
-      5) Fallback to the last resolved URL.
     """
-    # Step 1: direct ?url param
-    tgt = _extract_url_param(u)
-    if tgt != u and not is_google_wrapper(tgt):
-        return tgt
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://news.google.com/"
-    }
     try:
-        resp = requests.get(u, timeout=timeout, headers=headers, allow_redirects=True)
-        final_url = resp.url or u
+        decoded_url = gnewsdecoder(source_url, interval=interval_time)
 
-        # Step 2: if we already landed off Google, return it
-        host = urlparse(final_url).netloc.lower()
-        if "google.com" not in host and "news.google.com" not in host:
-            return final_url
+        if decoded_url.get("status"):
+            print("Decoded URL:", decoded_url["decoded_url"])
+        else:
+            print("Error:", decoded_url["message"])
+    except Exception as e:
+        print(f"Error occurred: {e}")
 
-        # Step 3/4: parse HTML for external links
-        try:
-            doc = lh.fromstring(resp.text)
-        except Exception:
-            return final_url
-
-        # Prefer anchors pointing to www.google.com/url?url=<publisher>
-        for a in doc.xpath("//a[@href]"):
-            href = a.get("href") or ""
-            if href.startswith("https://www.google.") and "/url" in href:
-                target = _extract_url_param(href)
-                if target and not is_google_wrapper(target):
-                    return target
-
-        # Otherwise pick the first external absolute link
-        def _is_external(h: str) -> bool:
-            if not h.startswith("http"):
-                return False
-            hhost = urlparse(h).netloc.lower()
-            if "google.com" in hhost or "news.google.com" in hhost:
-                return False
-            if "gstatic.com" in hhost or "googleusercontent.com" in hhost:
-                return False
-            return True
-
-        for a in doc.xpath("//a[@href]"):
-            href = a.get("href") or ""
-            if _is_external(href):
-                return href
-
-        # Fallback
-        return final_url
-    except Exception:
-        return u
-
-def resolve_feed_link(u: str) -> str:
+def resolve_feed_link(url: str) -> str:
     """Normalize feed links; for Google wrappers, resolve to publisher URL."""
-    return resolve_google_news_url(u) if is_google_wrapper(u) else u
+    return resolve_google_news_url(url) if is_google_wrapper(url) else url
 
 # =============== HELPERS TO CHECK THE ARTICLES =========================== #
 
 ARTICLE_EXT_BLOCKLIST = (".css", ".js", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".ico", ".woff", ".woff2")
 
-def _looks_like_article_odoo(u: str) -> bool:
-    p = urlparse(u)
-    if p.netloc not in ("www.odoo.com", "odoo.com"):
+def _looks_like_article_odoo(url: str) -> bool:
+    parsed_url = urlparse(url)
+    if parsed_url.netloc not in ("www.odoo.com", "odoo.com"):
         return False
-    path = p.path or ""
+    path = parsed_url.path or ""
     if "/blog/" not in path:
         return False
     if re.fullmatch(r"/[a-z]{2}_[A-Z]{2}/blog/?", path):
@@ -263,7 +214,7 @@ def call_llm(prompt: str,
 
     if provider == "ollama":
         # Normalize base URL (do NOT include /api in the env var)
-        base = (os.getenv("OLLAMA_URL") or "http://127.0.0.1:11434/api/chat").rstrip("/")
+        base = (os.getenv("OLLAMA_URL") or "http://127.0.0.1:11434/api/generate").rstrip("/")
         if base.endswith("/api"):
             base = base[:-4]
         model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct")
@@ -294,29 +245,29 @@ def call_llm(prompt: str,
         headers = {"Content-Type": "application/json"}
 
         # Prefer the chat endpoint; include keep_alive to keep the model loaded
-        payload_chat = {
+        payload_gen = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "prompt": prompt,
             "stream": False,
             "options": opts,
             "keep_alive": keep_alive,
         }
 
         try:
-            r = requests.post(chat_url, json=payload_chat, headers=headers, timeout=http_timeout)
+            response = requests.post(generate_url, json=payload_gen, headers=headers, timeout=http_timeout)
             # Fallback to /api/generate if chat endpoint is unavailable
-            if r.status_code in (404, 405):
-                payload_gen = {
+            if response.status_code in (404, 405):
+                payload_chat = {
                     "model": model,
-                    "prompt": prompt,
+                    "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "options": opts,
                     "keep_alive": keep_alive,
                 }
-                r = requests.post(generate_url, json=payload_gen, headers=headers, timeout=http_timeout)
+                response = requests.post(chat_url, json=payload_chat, headers=headers, timeout=http_timeout)
 
-            r.raise_for_status()
-            data = r.json()
+            response.raise_for_status()
+            data = response.json()
 
             # Parse response: chat -> message.content, generate -> response
             text = None
@@ -333,9 +284,9 @@ def call_llm(prompt: str,
             # Retry once with a shorter target length and a longer timeout
             opts["num_predict"] = max(400, num_predict // 2)  # cut length to speed up
             payload_chat["options"] = opts
-            r2 = requests.post(chat_url, json=payload_chat, headers=headers, timeout=max(http_timeout, 600))
-            r2.raise_for_status()
-            data = r2.json()
+            response_chat = requests.post(chat_url, json=payload_chat, headers=headers, timeout=max(http_timeout, 600))
+            response_chat.raise_for_status()
+            data = response_chat.json()
             text = None
             if isinstance(data.get("message"), dict):
                 text = data["message"].get("content")
@@ -362,13 +313,13 @@ def save_state(seen: set) -> None:
 def fetch_rss(url: str) -> List[Dict]:
     feed = feedparser.parse(url)
     items = []
-    for e in feed.entries:
-        link = getattr(e, "link", None) or getattr(e, "id", None)
+    for entry in feed.entries:
+        link = getattr(entry, "link", None) or getattr(entry, "id", None)
         if not link:
             continue
         link = resolve_feed_link(link)  # <-- resolve Google News to publisher
-        title = getattr(e, "title", "") or "(untitled)"
-        published = getattr(e, "published", "") or ""
+        title = getattr(entry, "title", "") or "(untitled)"
+        published = getattr(entry, "published", "") or ""
         items.append({"title": title, "url": link, "published": published})
     return items
 
@@ -626,14 +577,14 @@ def main():
                 items = fetch_rss(src["url"])
             else:
                 items = fetch_page_listing(src["url"])
-            for it in items:
-                it["source"] = src["label"]
-                it["id"] = _hash(it["url"])
+            for item in items:
+                item["source"] = src["label"]
+                item["id"] = _hash(item["url"])
         except Exception:
             items = []
-        for it in items:
-            if it["id"] not in seen:
-                candidates.append(it)
+        for item in items:
+            if item["id"] not in seen:
+                candidates.append(item)
 
     # deduplicate by URL (strip querystring)
     uniq: Dict[str, Dict] = {}
