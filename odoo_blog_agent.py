@@ -97,9 +97,10 @@ def resolve_google_news_url(source_url: str, interval_time: int = 1):
         decoded_url = gnewsdecoder(source_url, interval=interval_time)
 
         if decoded_url.get("status"):
-            print("Decoded URL:", decoded_url["decoded_url"])
+            return decoded_url["decoded_url"]
         else:
             print("Error:", decoded_url["message"])
+            return source_url
     except Exception as e:
         print(f"Error occurred: {e}")
 
@@ -597,10 +598,8 @@ def main():
 
     written = []
     for item in queue:
-        url = resolve_feed_link(item["url"])  # ensure original article URL
-
         # 2) extract
-        title, text = extract_article(url)
+        title, text = extract_article(item["url"])
         if len((text or "")) < MIN_LEN_CHARS:
             continue
 
