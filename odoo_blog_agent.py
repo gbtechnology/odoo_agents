@@ -35,14 +35,14 @@ MODEL_NAME      = os.getenv("LLM_MODEL", "your-llm-id")
 LLM_API_KEY     = os.getenv("LLM_API_KEY", "YOUR_API_KEY")
 
 SOURCES: List[Dict] = [
-    # --- Odoo / Community ---
-    {"type": "page", "url": "https://www.odoo.com/blog", "label": "Odoo Blog"},
-    {"type": "page", "url": "https://odoo-community.org/blog/news-updates-1", "label": "OCA News"},
     # --- ERP / General (English queries) ---
-    {"type": "rss",  "url": "https://news.google.com/rss/search?q=Odoo%20ERP&hl=en&gl=US&ceid=US:en", "label": "GoogleNews Odoo"},
+    {"type": "rss",  "url": "https://news.google.com/rss/search?q=Odoo&hl=en&gl=US&ceid=US:en", "label": "GoogleNews Odoo"},
     {"type": "rss",  "url": "https://news.google.com/rss/search?q=ERP%20software&hl=en&gl=US&ceid=US:en", "label": "GoogleNews ERP"},
     {"type": "page", "url": "https://news.sap.com", "label": "SAP News"},
     {"type": "page", "url": "https://erpnews.com/", "label": "ERPNews"},
+    # --- Odoo / Community ---
+    {"type": "page", "url": "https://www.odoo.com/blog//odoo-news-5", "label": "Odoo Blog"},
+    {"type": "page", "url": "https://odoo-community.org/blog/news-updates-1", "label": "OCA News"},
 ]
 
 CATEGORIES = [
@@ -424,7 +424,7 @@ def extract_article(url: str) -> Tuple[str, str]:
         return "", ""
 
     try:
-        doc = LH.fromstring(html)
+        doc = lh.fromstring(html)
     except Exception:
         doc = None
 
