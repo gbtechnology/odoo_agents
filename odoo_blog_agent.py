@@ -65,58 +65,96 @@ def warmup_ollama():
         pass
 
 # =============== HELPERS TO CHECK GOOGLE NEWS ARTICLES =========================== #
-
-def is_google_news_link(u: str) -> bool:
-    """Return True if the URL belongs to Google News article RSS/aggregator."""
+def is_google_wrapper(u: str) -> bool:
+    """Return True if the link is a Google wrapper (Google News or google.com/url)."""
     try:
         p = urlparse(u)
         host = p.netloc.lower()
-        return "news.google.com" in host
+        if "news.google.com" in host:
+            return True
+        if host.startswith("www.google.") and p.path == "/url":
+            return True
     except Exception:
-        return False
+        pass
+    return False
 
-def resolve_google_news_url(u: str, timeout: int = 20) -> str:
-    """
-    Resolve a Google News aggregator URL to the original publisher URL.
-    Strategy:
-      1) Use the 'url=' query parameter if present.
-      2) Follow redirects; if still on news.google.com, parse HTML and pick first external <a href>.
-      3) Fallback to the last resolved URL (even if Google).
-    """
+def _extract_url_param(u: str) -> str:
+    """If URL has ?url=<encoded>, return that target; else return input."""
     try:
-        p = urlparse(u)
-        qs = parse_qs(p.query)
+        qs = parse_qs(urlparse(u).query)
         if "url" in qs and qs["url"]:
             return qs["url"][0]
+    except Exception:
+        pass
+    return u
 
-        # Fetch the page (handle 302 redirects automatically)
-        resp = requests.get(u, timeout=timeout, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Safari/537.36"
-        }, allow_redirects=True)
+def resolve_google_news_url(u: str, timeout: int = 25) -> str:
+    """
+    Resolve Google News aggregator URL to the original publisher URL.
+    Strategy:
+      1) If a ?url= param exists, use it.
+      2) GET the page (with redirects). If final URL is non-Google, return it.
+      3) Parse HTML; prefer <a href="https://www.google.com/url?url=..."> (extract url=).
+      4) Else pick first external absolute link (not *.google.* / *.gstatic.* / *.googleusercontent.*).
+      5) Fallback to the last resolved URL.
+    """
+    # Step 1: direct ?url param
+    tgt = _extract_url_param(u)
+    if tgt != u and not is_google_wrapper(tgt):
+        return tgt
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://news.google.com/"
+    }
+    try:
+        resp = requests.get(u, timeout=timeout, headers=headers, allow_redirects=True)
         final_url = resp.url or u
 
-        # If we already landed on a non-Google host, return it
-        if not is_google_news_link(final_url) and "google.com" not in urlparse(final_url).netloc.lower():
+        # Step 2: if we already landed off Google, return it
+        host = urlparse(final_url).netloc.lower()
+        if "google.com" not in host and "news.google.com" not in host:
             return final_url
 
-        # Otherwise parse the HTML and look for the first external link
+        # Step 3/4: parse HTML for external links
         try:
             doc = lh.fromstring(resp.text)
-            for a in doc.xpath("//a[@href]"):
-                href = a.get("href") or ""
-                if href.startswith("http") and "google.com" not in href and "news.google.com" not in href:
-                    return href
         except Exception:
-            pass
+            return final_url
 
-        # Fallback: return whatever we have
+        # Prefer anchors pointing to www.google.com/url?url=<publisher>
+        for a in doc.xpath("//a[@href]"):
+            href = a.get("href") or ""
+            if href.startswith("https://www.google.") and "/url" in href:
+                target = _extract_url_param(href)
+                if target and not is_google_wrapper(target):
+                    return target
+
+        # Otherwise pick the first external absolute link
+        def _is_external(h: str) -> bool:
+            if not h.startswith("http"):
+                return False
+            hhost = urlparse(h).netloc.lower()
+            if "google.com" in hhost or "news.google.com" in hhost:
+                return False
+            if "gstatic.com" in hhost or "googleusercontent.com" in hhost:
+                return False
+            return True
+
+        for a in doc.xpath("//a[@href]"):
+            href = a.get("href") or ""
+            if _is_external(href):
+                return href
+
+        # Fallback
         return final_url
     except Exception:
         return u
 
 def resolve_feed_link(u: str) -> str:
-    """Normalize feed links (Google News → original publisher)."""
-    return resolve_google_news_url(u) if is_google_news_link(u) else u
+    """Normalize feed links; for Google wrappers, resolve to publisher URL."""
+    return resolve_google_news_url(u) if is_google_wrapper(u) else u
 
 # =============== HELPERS TO CHECK THE ARTICLES =========================== #
 
@@ -328,9 +366,7 @@ def fetch_rss(url: str) -> List[Dict]:
         link = getattr(e, "link", None) or getattr(e, "id", None)
         if not link:
             continue
-        # Resolve Google News aggregator links to original publisher
-        link = resolve_feed_link(link)
-
+        link = resolve_feed_link(link)  # <-- resolve Google News to publisher
         title = getattr(e, "title", "") or "(untitled)"
         published = getattr(e, "published", "") or ""
         items.append({"title": title, "url": link, "published": published})
@@ -611,7 +647,7 @@ def main():
     written = []
     for item in queue:
         url = resolve_feed_link(item["url"])  # ensure original article URL
-        
+
         # 2) extract
         title, text = extract_article(url)
         if len((text or "")) < MIN_LEN_CHARS:
