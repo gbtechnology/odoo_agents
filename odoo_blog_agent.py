@@ -11,7 +11,7 @@ import lxml.html as lh
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from readability import Document
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, parse_qs, urljoin
 import requests
 import feedparser
 import frontmatter
@@ -63,6 +63,60 @@ def warmup_ollama():
         _ = call_llm("Say OK.", model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b-instruct"), max_tokens=32)
     except Exception:
         pass
+
+# =============== HELPERS TO CHECK GOOGLE NEWS ARTICLES =========================== #
+
+def is_google_news_link(u: str) -> bool:
+    """Return True if the URL belongs to Google News article RSS/aggregator."""
+    try:
+        p = urlparse(u)
+        host = p.netloc.lower()
+        return "news.google.com" in host
+    except Exception:
+        return False
+
+def resolve_google_news_url(u: str, timeout: int = 20) -> str:
+    """
+    Resolve a Google News aggregator URL to the original publisher URL.
+    Strategy:
+      1) Use the 'url=' query parameter if present.
+      2) Follow redirects; if still on news.google.com, parse HTML and pick first external <a href>.
+      3) Fallback to the last resolved URL (even if Google).
+    """
+    try:
+        p = urlparse(u)
+        qs = parse_qs(p.query)
+        if "url" in qs and qs["url"]:
+            return qs["url"][0]
+
+        # Fetch the page (handle 302 redirects automatically)
+        resp = requests.get(u, timeout=timeout, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Safari/537.36"
+        }, allow_redirects=True)
+        final_url = resp.url or u
+
+        # If we already landed on a non-Google host, return it
+        if not is_google_news_link(final_url) and "google.com" not in urlparse(final_url).netloc.lower():
+            return final_url
+
+        # Otherwise parse the HTML and look for the first external link
+        try:
+            doc = lh.fromstring(resp.text)
+            for a in doc.xpath("//a[@href]"):
+                href = a.get("href") or ""
+                if href.startswith("http") and "google.com" not in href and "news.google.com" not in href:
+                    return href
+        except Exception:
+            pass
+
+        # Fallback: return whatever we have
+        return final_url
+    except Exception:
+        return u
+
+def resolve_feed_link(u: str) -> str:
+    """Normalize feed links (Google News → original publisher)."""
+    return resolve_google_news_url(u) if is_google_news_link(u) else u
 
 # =============== HELPERS TO CHECK THE ARTICLES =========================== #
 
@@ -274,6 +328,9 @@ def fetch_rss(url: str) -> List[Dict]:
         link = getattr(e, "link", None) or getattr(e, "id", None)
         if not link:
             continue
+        # Resolve Google News aggregator links to original publisher
+        link = resolve_feed_link(link)
+
         title = getattr(e, "title", "") or "(untitled)"
         published = getattr(e, "published", "") or ""
         items.append({"title": title, "url": link, "published": published})
@@ -553,8 +610,8 @@ def main():
 
     written = []
     for item in queue:
-        url = item["url"]
-
+        url = resolve_feed_link(item["url"])  # ensure original article URL
+        
         # 2) extract
         title, text = extract_article(url)
         if len((text or "")) < MIN_LEN_CHARS:
