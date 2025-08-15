@@ -599,7 +599,8 @@ def main():
     written = []
     for item in queue:
         # 2) extract
-        title, text = extract_article(item["url"])
+        url = item["url"]
+        title, text = extract_article(url)
         if len((text or "")) < MIN_LEN_CHARS:
             continue
 
