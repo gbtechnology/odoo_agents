@@ -26,6 +26,7 @@ Notes:
 
 import os
 import sys
+import re
 import glob
 import html
 import traceback
@@ -50,6 +51,22 @@ except Exception:
 # --------------------------
 # XML-RPC helpers
 # --------------------------
+
+# Remove a leading fenced YAML block at the very beginning of the body
+yaml_fence_re = re.compile(r'^\s*```(?:yaml|yml)?\s+.*?```', re.IGNORECASE | re.DOTALL)
+
+# Remove an in-body “Sources” section if present to avoid duplicates
+sources_section_re = re.compile(
+    r'(?ims)^\s{0,3}#{1,6}\s*Sources\s*$.*?(?=^\s{0,3}#{1,6}\s|\Z)'
+)
+
+def strip_leading_yaml_fence(md_text: str) -> str:
+    """Remove the first fenced YAML block at the very beginning of the body, if present."""
+    return yaml_fence_re.sub('', md_text, count=1).lstrip()
+
+def strip_inline_sources_section(md_text: str) -> str:
+    """Remove a Markdown section titled 'Sources' (any heading level) to prevent duplication."""
+    return sources_section_re.sub('', md_text).rstrip()
 
 def connect_odoo() -> Tuple[str, int, xmlrpclib.ServerProxy]:
     """Authenticate on Odoo and return (db, uid, models_proxy)."""
@@ -134,6 +151,9 @@ def load_md_post(path: Path) -> Tuple[Dict, str]:
     post = frontmatter.load(path)
     meta = post.metadata or {}
     body = post.content or ""
+    # Sanitize body: drop stray fenced YAML and any inline “Sources” section
+    body = strip_leading_yaml_fence(body)
+    body = strip_inline_sources_section(body)
     return meta, body
 
 
@@ -165,7 +185,8 @@ def import_post(models: xmlrpclib.ServerProxy, db: str, uid: int, pwd: str,
         pwd,
         "res.partner",
         "search", [("email", "=", author_email)],
-        {"limit": 1}
+        {
+            "limit": 1}
     )
 
     # Base values
