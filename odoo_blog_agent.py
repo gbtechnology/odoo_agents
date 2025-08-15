@@ -246,26 +246,26 @@ def call_llm(prompt: str,
         headers = {"Content-Type": "application/json"}
 
         # Prefer the chat endpoint; include keep_alive to keep the model loaded
-        payload_gen = {
+        payload_chat = {
             "model": model,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "stream": False,
             "options": opts,
             "keep_alive": keep_alive,
         }
 
         try:
-            response = requests.post(generate_url, json=payload_gen, headers=headers, timeout=http_timeout)
+            response = requests.post(chat_url, json=payload_chat, headers=headers, timeout=http_timeout)
             # Fallback to /api/generate if chat endpoint is unavailable
             if response.status_code in (404, 405):
-                payload_chat = {
+                payload_gen = {
                     "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "prompt": prompt,
                     "stream": False,
                     "options": opts,
                     "keep_alive": keep_alive,
                 }
-                response = requests.post(chat_url, json=payload_chat, headers=headers, timeout=http_timeout)
+                response = requests.post(generate_url, json=payload_gen, headers=headers, timeout=http_timeout)
 
             response.raise_for_status()
             data = response.json()
