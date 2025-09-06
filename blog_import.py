@@ -47,6 +47,12 @@ except Exception:
         """Fallback: escape and wrap in <pre> if markdown is not installed."""
         return f"<pre>{html.escape(md_text)}</pre>"  # pragma: no cover
 
+try:
+    from dotenv import load_dotenv, find_dotenv
+    load_dotenv(find_dotenv())
+except Exception:
+    pass
+
 
 # --------------------------
 # XML-RPC helpers
@@ -184,22 +190,26 @@ def import_post(models: xmlrpclib.ServerProxy, db: str, uid: int, pwd: str,
         uid,
         pwd,
         "res.partner",
-        "search", [("email", "=", author_email)],
-        {
+        "search_read", [[["email", "=", author_email]]],
+        {'fields': [
+            'id', 'name'
+            ],
             "limit": 1}
     )
 
     # Base values
     vals: Dict = {
         "blog_id": blog_id,
-        "title": title,
+        "name": title,
         "content": content_html,
-        "author_id": author_id.id
+        "author_id": author_id[0]["id"],
+        "author_name": author_id[0]["name"],
+        "is_published": False
     }
 
     # Upsert behavior
     # Search for an existing post with same title in the same blog
-    domain = [["blog_id", "=", blog_id], ["title", "=", title]]
+    domain = [["blog_id", "=", blog_id], ["name", "=", title]]
     existing_ids = models.execute_kw(db, uid, pwd, "blog.post", "search", [domain], {"limit": 1})
 
     if existing_ids:
